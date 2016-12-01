@@ -88,7 +88,7 @@ class OLTDown(base_tests.SimpleDataPlane):
         Groups = Queue.LifoQueue()
         ports = sorted(config["port_map"].keys())
 
-        vlan_id = 23
+        vlan_id = 1
         new_vlan_id = 25
         out_vlan_id = 100
 
@@ -101,8 +101,11 @@ class OLTDown(base_tests.SimpleDataPlane):
             match.oxm_list.append(ofp.oxm.vlan_vid_masked(0x1000 + out_vlan_id, 0x1fff))
 
             actions = []
+#            actions.append(ofp.action.pop_vlan())
+#            actions.append(ofp.action.set_field(ofp.oxm.vlan_vid(vlan_id | 0x1000)))
+#            actions.append(ofp.action.pop_vlan())
+            actions.append(ofp.action.set_field(ofp.oxm.exp2ByteValue(exp_type=ofp.oxm.OFDPA_EXP_TYPE_OVID, value=0x1000+out_vlan_id)))
             actions.append(ofp.action.pop_vlan())
-            actions.append(ofp.action.set_field(ofp.oxm.vlan_vid(vlan_id | 0x1000)))
 
             request = ofp.message.flow_add(
                 table_id=10,
@@ -117,10 +120,36 @@ class OLTDown(base_tests.SimpleDataPlane):
                 priority=0)
             print("Add vlan %d tagged packets on port %d and go to table 20" % (vlan_id, port))
             self.controller.message_send(request)
-
             Groups.put(L2gid)
 
-        msg = add_l2_flood_group(self.controller, ports, out_vlan_id, vlan_id)
+#Set vlan 1 table
+            match = ofp.match()
+            match.oxm_list.append(ofp.oxm.in_port(port))
+            match.oxm_list.append(ofp.oxm.vlan_vid_masked(0x1000+new_vlan_id,0x1fff))
+            match.oxm_list.append(ofp.oxm.exp2ByteValue(ofp.oxm.OFDPA_EXP_TYPE_OVID, 0x1000+out_vlan_id))
+
+            actions=[]
+#            actions.append(ofp.action.pop_vlan())
+#            actions.append(ofp.action.push_vlan(0x8100))
+            actions.append(ofp.action.set_field(ofp.oxm.vlan_vid(0x1000+vlan_id)))
+
+            request = ofp.message.flow_add(
+                table_id=11,
+                cookie=42,
+                match=match,
+                instructions=[
+                    ofp.instruction.apply_actions(
+                        actions=actions
+                    ),
+                    ofp.instruction.goto_table(20)
+                ],
+                priority=0)
+            print("Add vlan 1 double tagged %d-%d packets on port %d and go to table %d" %( out_vlan_id, new_vlan_id, port, 11))
+            self.controller.message_send(request)
+
+
+
+        msg = add_l2_flood_group(self.controller, ports, vlan_id, vlan_id)
         print(msg.group_id)
         Groups.put(msg.group_id)
         add_bridge_flow(self.controller, None, vlan_id, msg.group_id, True)
@@ -141,8 +170,9 @@ class OLTDown(base_tests.SimpleDataPlane):
             # change dest based on port number
             mac_src = '00:12:34:56:78:%02X' % ofport
 
-            parsed_pkt = simple_tcp_packet(dl_vlan_enable=True, vlan_vid=vlan_id, eth_dst='00:12:34:56:78:9a')
+            parsed_pkt = simple_tcp_packet(pktlen=96,dl_vlan_enable=True, vlan_vid=vlan_id, eth_dst='00:12:34:56:78:9a' )
             pkt = str(parsed_pkt)
+#            self.dataplane.send(ofport, pkt)
             # self won't rx packet
             verify_no_packet(self, pkt, ofport)
             # others will rx packet
