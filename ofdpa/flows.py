@@ -12,48 +12,219 @@ from oftest.testutils import *
 from accton_util import *
 from utils import *
 
-class OLT( base_tests.SimpleDataPlane ):
+
+class RuleTest(base_tests.SimpleDataPlane):
     """
-    Verify set vlan and push another vlan tag
+    Test L2 flood to a vlan
+    Send a packet with unknown dst_mac and check if the packet is flooded to all ports except inport
     """
 
-    def runTest( self ):
-        Groups = Queue.LifoQueue( )
-        try:
-            ports = sorted( config[ "port_map" ].keys( ) )
-            vlan_id = 1
+    """
+    Mcast routing, in this test case the traffic is tagged.
+    port+1 is used as ingress vlan_id. The packet goes out
+    tagged. 4094-port is used as egress vlan_id
+    """
 
-            for port in ports:
-                L2gid, l2msg = add_one_l2_interface_group( self.controller, port, vlan_id, True, False )
-                add_one_vlan_table_flow( self.controller, port, vlan_id, flag=VLAN_TABLE_FLAG_ONLY_TAG )
-                Groups.put( L2gid )
+    def runTest(self):
+        # Hashes Test Name and uses it as id for installing unique groups
 
-            msg = add_l2_flood_group( self.controller, ports, vlan_id, vlan_id )
-            Groups.put( msg.group_id )
-            add_bridge_flow( self.controller, None, vlan_id, msg.group_id, True )
-            do_barrier( self.controller )
+        ports = sorted( config[ "port_map" ].keys( ) )
 
-            # verify flood
-            for ofport in ports:
-                # change dest based on port number
-                mac_src = '00:12:34:56:78:%02X' % ofport
-                parsed_pkt = simple_tcp_packet_two_vlan( pktlen=108, out_dl_vlan_enable=True,
-                        out_vlan_vid=vlan_id, in_dl_vlan_enable=True, in_vlan_vid=10,
-                        eth_dst='00:12:34:56:78:9a', eth_src=mac_src )
-                pkt = str( parsed_pkt )
-                self.dataplane.send( ofport, pkt )
-                # self won't rx packet
-                verify_no_packet( self, pkt, ofport )
-                # others will rx packet
-                tmp_ports = list( ports )
-                tmp_ports.remove( ofport )
-                verify_packets( self, pkt, tmp_ports )
+        of_port=12
+        vlan_id=23
 
-            verify_no_other_packets( self )
-        finally:
-            delete_all_flows( self.controller )
-            delete_groups( self.controller, Groups )
-            delete_all_groups( self.controller )
+        match = ofp.match()
+        match.oxm_list.append(ofp.oxm.in_port(of_port))
+        match.oxm_list.append(ofp.oxm.vlan_vid_masked(0x1000 + vlan_id, 0x1fff))
+
+        actions = []
+
+
+        actions.append(ofp.action.set_field(ofp.oxm.vlan_vid(value=999)))
+
+        request = ofp.message.flow_add(
+            table_id=10,
+            cookie=42,
+            match=match,
+            instructions=[
+                ofp.instruction.apply_actions(
+                    actions=actions
+                ),
+                ofp.instruction.goto_table(20)
+            ],
+            priority=0)
+        print("Add vlan %d tagged packets on port %d and go to table 20" % (vlan_id, of_port))
+        self.controller.message_send(request)
+
+        # verify flood
+        for ofport in ports:
+            # change dest based on port number
+            pkt = str(
+                simple_tcp_packet(dl_vlan_enable=True, vlan_vid=vlan_id, eth_dst='00:12:34:56:78:9a'))
+            self.dataplane.send(ofport, pkt)
+
+            # change dest based on port number
+            mac_src = '00:12:34:56:78:%02X' % ofport
+            parsed_pkt = simple_tcp_packet_two_vlan(pktlen=108, out_dl_vlan_enable=True,
+                                                    out_vlan_vid=vlan_id, in_dl_vlan_enable=True, in_vlan_vid=10,
+                                                    eth_dst='00:12:34:56:78:9a', eth_src=mac_src)
+            pkt = str(parsed_pkt)
+            # self won't rx packet
+            verify_no_packet(self, pkt, ofport)
+            # others will rx packet
+            tmp_ports = list(ports)
+            tmp_ports.remove(ofport)
+            verify_packets(self, pkt, tmp_ports)
+        verify_no_other_packets(self)
+
+class OLTDown(base_tests.SimpleDataPlane):
+    """
+    Test L2 flood to a vlan
+    Send a packet with unknown dst_mac and check if the packet is flooded to all ports except inport
+    """
+
+    def runTest(self):
+        # Hashes Test Name and uses it as id for installing unique groups
+        Groups = Queue.LifoQueue()
+        ports = sorted(config["port_map"].keys())
+
+        vlan_id = 23
+        new_vlan_id = 25
+        out_vlan_id = 100
+
+        for port in ports:
+            L2gid, l2msg = add_one_l2_interface_group(self.controller, port, vlan_id, True, False)
+            # add_one_vlan_table_flow(self.controller, port, vlan_id, flag=VLAN_TABLE_FLAG_ONLY_TAG)
+
+            match = ofp.match()
+            match.oxm_list.append(ofp.oxm.in_port(port))
+            match.oxm_list.append(ofp.oxm.vlan_vid_masked(0x1000 + out_vlan_id, 0x1fff))
+
+            actions = []
+            actions.append(ofp.action.pop_vlan())
+            actions.append(ofp.action.set_field(ofp.oxm.vlan_vid(vlan_id | 0x1000)))
+
+            request = ofp.message.flow_add(
+                table_id=10,
+                cookie=42,
+                match=match,
+                instructions=[
+                    ofp.instruction.apply_actions(
+                        actions=actions
+                    ),
+                    ofp.instruction.goto_table(11)
+                ],
+                priority=0)
+            print("Add vlan %d tagged packets on port %d and go to table 20" % (vlan_id, port))
+            self.controller.message_send(request)
+
+            Groups.put(L2gid)
+
+        msg = add_l2_flood_group(self.controller, ports, out_vlan_id, vlan_id)
+        print(msg.group_id)
+        Groups.put(msg.group_id)
+        add_bridge_flow(self.controller, None, vlan_id, msg.group_id, True)
+        do_barrier(self.controller)
+
+        # verify flood
+        for ofport in ports:
+            # change dest based on port number
+
+
+            pkt = str(
+                simple_tcp_packet_two_vlan(pktlen=100, out_dl_vlan_enable=True,
+                                           out_vlan_vid=out_vlan_id, in_dl_vlan_enable=True,
+                                           in_vlan_vid=new_vlan_id,
+                                           eth_dst='00:12:34:56:78:9a'))
+            self.dataplane.send(ofport, pkt)
+
+            # change dest based on port number
+            mac_src = '00:12:34:56:78:%02X' % ofport
+
+            parsed_pkt = simple_tcp_packet(dl_vlan_enable=True, vlan_vid=vlan_id, eth_dst='00:12:34:56:78:9a')
+            pkt = str(parsed_pkt)
+            # self won't rx packet
+            verify_no_packet(self, pkt, ofport)
+            # others will rx packet
+            tmp_ports = list(ports)
+            tmp_ports.remove(ofport)
+            verify_packets(self, pkt, tmp_ports)
+        verify_no_other_packets(self)
+
+
+class OLTUp(base_tests.SimpleDataPlane):
+    """
+    Test L2 flood to a vlan
+    Send a packet with unknown dst_mac and check if the packet is flooded to all ports except inport
+    """
+    def runTest(self):
+        # Hashes Test Name and uses it as id for installing unique groups
+        Groups = Queue.LifoQueue()
+        ports = sorted( config[ "port_map" ].keys( ) )
+
+        vlan_id=23
+        new_vlan_id=25
+        out_vlan_id=100
+
+        for port in ports:
+            L2gid, l2msg = add_one_l2_interface_group(self.controller, port, out_vlan_id, True, False)
+            #add_one_vlan_table_flow(self.controller, port, vlan_id, flag=VLAN_TABLE_FLAG_ONLY_TAG)
+
+            match = ofp.match()
+            match.oxm_list.append(ofp.oxm.in_port(port))
+            match.oxm_list.append(ofp.oxm.vlan_vid_masked(0x1000 + vlan_id, 0x1fff))
+
+            actions = []
+            actions.append(ofp.action.set_field(ofp.oxm.vlan_vid(new_vlan_id|0x1000)))
+            actions.append(ofp.action.push_vlan(0x8100))
+            actions.append(ofp.action.set_field(ofp.oxm.vlan_vid(out_vlan_id|0x1000)))
+
+            request = ofp.message.flow_add(
+                table_id=10,
+                cookie=42,
+                match=match,
+                instructions=[
+                    ofp.instruction.apply_actions(
+                        actions=actions
+                    ),
+                    ofp.instruction.goto_table(20)
+                ],
+                priority=0)
+            print("Add vlan %d tagged packets on port %d and go to table 20" % (vlan_id, port))
+            self.controller.message_send(request)
+
+            Groups.put(L2gid)
+
+        msg = add_l2_flood_group(self.controller, ports, out_vlan_id, out_vlan_id)
+        print(msg.group_id)
+        Groups.put(msg.group_id)
+        add_bridge_flow(self.controller, None, out_vlan_id, msg.group_id, True)
+        do_barrier(self.controller)
+
+
+        # verify flood
+        for ofport in ports:
+            # change dest based on port number
+            pkt = str(
+                simple_tcp_packet(dl_vlan_enable=True, vlan_vid=vlan_id, eth_dst='00:12:34:56:78:9a'))
+            self.dataplane.send(ofport, pkt)
+
+            # change dest based on port number
+            mac_src = '00:12:34:56:78:%02X' % ofport
+            parsed_pkt = simple_tcp_packet_two_vlan(pktlen=104, out_dl_vlan_enable=True,
+                                                    out_vlan_vid=out_vlan_id, in_dl_vlan_enable=True, in_vlan_vid=new_vlan_id,
+                                                    eth_dst='00:12:34:56:78:9a')
+#            parsed_pkt = simple_tcp_packet(dl_vlan_enable=True, vlan_vid=new_vlan_id, eth_dst='00:12:34:56:78:9a')
+            pkt = str(parsed_pkt)
+            # self won't rx packet
+            verify_no_packet(self, pkt, ofport)
+            # others will rx packet
+            tmp_ports = list(ports)
+            tmp_ports.remove(ofport)
+            verify_packets(self, pkt, tmp_ports)
+        verify_no_other_packets(self)
+
+
 
 
 class PacketInUDP( base_tests.SimpleDataPlane ):
@@ -279,10 +450,12 @@ class L2FloodQinQ( base_tests.SimpleDataPlane ):
                 verify_packets( self, pkt, tmp_ports )
 
             verify_no_other_packets( self )
+
         finally:
-            delete_all_flows( self.controller )
-            delete_groups( self.controller, Groups )
-            delete_all_groups( self.controller )
+            print("END")
+#            delete_all_flows( self.controller )
+#            delete_groups( self.controller, Groups )
+#            delete_all_groups( self.controller )
 
 
 @disabled
@@ -1339,35 +1512,49 @@ class L3McastToL2TagToTagTranslated( base_tests.SimpleDataPlane ):
     """
     def runTest( self ):
         Groups = Queue.LifoQueue( )
-        try:
-            if len( config[ "port_map" ] ) < 2:
-                logging.info( "Port count less than 2, can't run this case" )
-                assert (False)
-                return
-            ports      = config[ "port_map" ].keys( )
-            dst_ip_str = "224.0.0.1"
-            (
-                port_to_in_vlan,
-                port_to_out_vlan,
-                port_to_src_mac_str,
-                port_to_dst_mac_str,
-                port_to_src_ip_str,
-                Groups) = fill_mcast_pipeline_L3toL2(
-                self.controller,
-                logging,
-                ports,
-                is_ingress_tagged   = True,
-                is_egress_tagged    = True,
-                is_vlan_translated  = True,
-                is_max_vlan         = False
-                )
+        if len( config[ "port_map" ] ) < 2:
+            logging.info( "Port count less than 2, can't run this case" )
+            assert (False)
+            return
+        ports      = config[ "port_map" ].keys( )
+        dst_ip_str = "224.0.0.1"
+        (
+            port_to_in_vlan,
+            port_to_out_vlan,
+            port_to_src_mac_str,
+            port_to_dst_mac_str,
+            port_to_src_ip_str,
+            Groups) = fill_mcast_pipeline_L3toL2(
+            self.controller,
+            logging,
+            ports,
+            is_ingress_tagged   = True,
+            is_egress_tagged    = True,
+            is_vlan_translated  = True,
+            is_max_vlan         = False
+            )
 
-            for in_port in ports:
+        for in_port in ports:
+
+            parsed_pkt = simple_udp_packet(
+                pktlen         = 100,
+                dl_vlan_enable = True,
+                vlan_vid       = port_to_in_vlan[in_port],
+                eth_dst        = port_to_dst_mac_str[in_port],
+                eth_src        = port_to_src_mac_str[in_port],
+                ip_ttl         = 64,
+                ip_src         = port_to_src_ip_str[in_port],
+                ip_dst         = dst_ip_str
+                )
+            pkt = str( parsed_pkt )
+            self.dataplane.send( in_port, pkt )
+
+            for out_port in ports:
 
                 parsed_pkt = simple_udp_packet(
                     pktlen         = 100,
                     dl_vlan_enable = True,
-                    vlan_vid       = port_to_in_vlan[in_port],
+                    vlan_vid       = port_to_out_vlan[in_port],
                     eth_dst        = port_to_dst_mac_str[in_port],
                     eth_src        = port_to_src_mac_str[in_port],
                     ip_ttl         = 64,
@@ -1375,30 +1562,12 @@ class L3McastToL2TagToTagTranslated( base_tests.SimpleDataPlane ):
                     ip_dst         = dst_ip_str
                     )
                 pkt = str( parsed_pkt )
-                self.dataplane.send( in_port, pkt )
+                if out_port == in_port:
+                    verify_no_packet( self, pkt, in_port )
+                    continue
+                verify_packet( self, pkt, out_port )
+                verify_no_other_packets( self )
 
-                for out_port in ports:
-
-                    parsed_pkt = simple_udp_packet(
-                        pktlen         = 100,
-                        dl_vlan_enable = True,
-                        vlan_vid       = port_to_out_vlan[in_port],
-                        eth_dst        = port_to_dst_mac_str[in_port],
-                        eth_src        = port_to_src_mac_str[in_port],
-                        ip_ttl         = 64,
-                        ip_src         = port_to_src_ip_str[in_port],
-                        ip_dst         = dst_ip_str
-                        )
-                    pkt = str( parsed_pkt )
-                    if out_port == in_port:
-                        verify_no_packet( self, pkt, in_port )
-                        continue
-                    verify_packet( self, pkt, out_port )
-                    verify_no_other_packets( self )
-        finally:
-            delete_all_flows( self.controller )
-            delete_groups( self.controller, Groups )
-            delete_all_groups( self.controller )
 
 
 class _MplsFwd( base_tests.SimpleDataPlane ):

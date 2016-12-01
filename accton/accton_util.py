@@ -242,12 +242,14 @@ def add_l2_flood_group(ctrl, ports, vlanid, id):
         group_id = encode_l2_interface_group_id(vlanid, of_port)
         action=[ofp.action.group(group_id)]
         buckets.append(ofp.bucket(actions=action))
+        print("Port %d, Group ID %d added into bucket " % (of_port, group_id))
 
     group_id =encode_l2_flood_group_id(vlanid, id)
     request = ofp.message.group_add(group_type=ofp.OFPGT_ALL,
                                     group_id=group_id,
                                     buckets=buckets
                                    )
+    print("Flood group ID %d " % (group_id))
     ctrl.message_send(request)
     return request
 
